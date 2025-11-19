@@ -89,8 +89,8 @@ def get_conversational_chain():
     """
     api_key = st.secrets["GOOGLE_API_KEY"]
     
-    # UPDATED: Switch from 'gemini-pro' to 'gemini-1.5-flash'
-    model = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3, google_api_key=api_key)
+    # UPDATED NOV 2025: Switched to 'gemini-2.5-flash' as 1.5 is deprecated.
+    model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3, google_api_key=api_key)
     
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
     chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
