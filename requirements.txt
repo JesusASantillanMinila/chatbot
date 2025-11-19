@@ -1,2 +1,8 @@
 streamlit
-openai
+google-generativeai
+langchain-google-genai
+langchain
+langchain-community
+faiss-cpu
+PyPDF2
+python-dotenv
