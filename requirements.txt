@@ -6,4 +6,3 @@ langchain-community
 faiss-cpu
 PyPDF2
 python-dotenv
-time
