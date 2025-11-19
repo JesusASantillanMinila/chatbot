@@ -1,174 +1,114 @@
-# resume_rag.py
-import os
-import json
-import faiss
 import streamlit as st
-from sentence_transformers import SentenceTransformer
-from gpt4all import GPT4All
-from typing import List, Dict
-import math
-import hashlib
+from PyPDF2 import PdfReader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+import google.generativeai as genai
+from langchain_community.vectorstores import FAISS
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.chains.question_answering import load_qa_chain
+from langchain.prompts import PromptTemplate
+import os
 
-# ---------- Config ----------
-EMBED_MODEL_NAME = "all-MiniLM-L6-v2"   # small & fast
-INDEX_PATH = "resume_index.faiss"
-META_PATH = "resume_metadata.json"
-CHUNK_SIZE = 400   # characters (approx). adjust if you prefer token-based chunking
-CHUNK_OVERLAP = 120
-TOP_K = 5
-GPT4ALL_MODEL = "ggml-gpt4all-j-v1.3-groovy.bin"  # example; gpt4all will download if allow_download=True
+# --- Page Config ---
+st.set_page_config(page_title="Resume Chatbot", layout="wide")
 
-# ---------- Utilities ----------
-def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
-    pieces = []
-    start = 0
-    text_len = len(text)
-    while start < text_len:
-        end = start + size
-        chunk = text[start:end]
-        pieces.append(chunk.strip())
-        start = max(end - overlap, end)  # move with overlap
-    return pieces
+# --- Header ---
+st.markdown("""
+<style>
+.big-font { font-size:30px !important; font-weight: bold; }
+</style>
+""", unsafe_allow_html=True)
+st.markdown('<p class="big-font">🤖 Chat with my Resume</p>', unsafe_allow_html=True)
 
-def hashed_id(text: str) -> str:
-    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+# --- Helper Functions ---
 
-# ---------- Index build/load ----------
-def build_index(emb_model: SentenceTransformer, resume_text: str):
-    # chunk
-    chunks = chunk_text(resume_text)
-    embeddings = emb_model.encode(chunks, show_progress_bar=True, convert_to_numpy=True)
+def get_pdf_text(pdf_docs):
+    """Extracts text from uploaded PDF files."""
+    text = ""
+    for pdf in pdf_docs:
+        pdf_reader = PdfReader(pdf)
+        for page in pdf_reader.pages:
+            text += page.extract_text()
+    return text
 
-    dim = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dim)  # simple index; fast for small datasets
-    index.add(embeddings)
+def get_text_chunks(text):
+    """Splits the text into manageable chunks for the vector store."""
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=1000)
+    chunks = text_splitter.split_text(text)
+    return chunks
 
-    # metadata
-    metadata = []
-    for i, chunk in enumerate(chunks):
-        metadata.append({
-            "id": i,
-            "text": chunk,
-            "hash": hashed_id(chunk),
-        })
+def get_vector_store(text_chunks):
+    """
+    Embeds text chunks using Google Gemini Embeddings and stores them in FAISS.
+    We pull the API Key from st.secrets for security.
+    """
+    api_key = st.secrets["GOOGLE_API_KEY"]
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
+    vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
+    vector_store.save_local("faiss_index")
 
-    # persist
-    faiss.write_index(index, INDEX_PATH)
-    with open(META_PATH, "w", encoding="utf-8") as f:
-        json.dump(metadata, f, ensure_ascii=False, indent=2)
+def get_conversational_chain():
+    """
+    Creates the chain that connects the LLM (Gemini) to the prompt.
+    """
+    prompt_template = """
+    Answer the question as detailed as possible from the provided context. 
+    If the answer is not in the provided context, just say, "The resume does not provide this information," don't make up the wrong answer.
+    
+    Context:
+    {context}
+    
+    Question: 
+    {question}
+    
+    Answer:
+    """
+    api_key = st.secrets["GOOGLE_API_KEY"]
+    model = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.3, google_api_key=api_key)
+    prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
+    chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
+    return chain
 
-    return index, metadata
-
-def load_index_and_meta(emb_model: SentenceTransformer):
-    if not (os.path.exists(INDEX_PATH) and os.path.exists(META_PATH)):
-        return None, None
-    meta = json.load(open(META_PATH, "r", encoding="utf-8"))
-    dim = emb_model.get_sentence_embedding_dimension()
-    index = faiss.read_index(INDEX_PATH)
-    return index, meta
-
-# ---------- Retrieval ----------
-def retrieve(emb_model: SentenceTransformer, index, metadata, query: str, top_k: int = TOP_K):
-    q_emb = emb_model.encode([query], convert_to_numpy=True)
-    D, I = index.search(q_emb, top_k)
-    results = []
-    for i, idx in enumerate(I[0]):
-        if idx < 0 or idx >= len(metadata):
-            continue
-        results.append({
-            "score": float(D[0][i]),
-            "text": metadata[idx]["text"],
-            "id": metadata[idx]["id"]
-        })
-    return results
-
-# ---------- LLM Answering (gpt4all) ----------
-def answer_with_gpt4all(model_name: str, system_prompt: str, user_prompt: str, max_tokens=512):
-    # model auto-downloads to cache dir if not present
-    model = GPT4All(model_name, allow_download=True)
-    with model.chat_session() as session:
-        # Provide a short system role/instruction
-        session.system(system_prompt)
-        session.user(user_prompt)
-        response = session.generate(max_tokens=max_tokens)
-    return response
-
-# ---------- Prompt builder ----------
-def build_prompt(question: str, retrieved_chunks: List[Dict]):
-    # Safety: instruct the model to ONLY use the provided context.
-    context_texts = "\n\n---\n\n".join([f"[chunk {r['id']}]\n{r['text']}" for r in retrieved_chunks])
-    system_prompt = (
-        "You are an assistant that answers questions using ONLY the provided resume context. "
-        "If the answer is not contained in the context, say: 'I don’t know based on the resume.' "
-        "Be concise and cite the chunk id when referencing specifics."
+def user_input(user_question):
+    """
+    Handles the user query: searches the vector store and generates a response.
+    """
+    api_key = st.secrets["GOOGLE_API_KEY"]
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
+    
+    # Load the FAISS index with security enabled deserialization
+    new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+    
+    docs = new_db.similarity_search(user_question)
+    chain = get_conversational_chain()
+    
+    response = chain(
+        {"input_documents": docs, "question": user_question},
+        return_only_outputs=True
     )
-    user_prompt = (
-        f"Context:\n{context_texts}\n\nQuestion: {question}\n\n"
-        "Answer the question using only the context. If you cannot answer, say you don't know."
-    )
-    return system_prompt, user_prompt
+    st.write("reply: ", response["output_text"])
 
-# ---------- Streamlit UI ----------
-def main():
-    st.set_page_config(page_title="Resume RAG Chat", layout="centered")
-    st.title("RAG Chatbot — Resume Assistant (local & free)")
+# --- Sidebar (Resume Upload) ---
+with st.sidebar:
+    st.title("Upload Resume")
+    pdf_docs = st.file_uploader("Upload your PDF Resume here", accept_multiple_files=True)
+    if st.button("Process Resume"):
+        with st.spinner("Processing..."):
+            try:
+                raw_text = get_pdf_text(pdf_docs)
+                text_chunks = get_text_chunks(raw_text)
+                get_vector_store(text_chunks)
+                st.success("Done! You can now ask questions.")
+            except Exception as e:
+                st.error(f"Error processing file: {e}")
+                st.error("Did you set your API key in Streamlit Secrets?")
 
-    # Sidebar: upload resume
-    st.sidebar.header("Resume (txt)")
-    uploaded = st.sidebar.file_uploader("Upload a plain text resume (.txt). For PDF/DOCX see README below.", type=["txt"])
-    if uploaded:
-        resume_text = uploaded.read().decode("utf-8")
-        st.sidebar.success("Uploaded resume.txt")
-    else:
-        if os.path.exists("resume.txt"):
-            resume_text = open("resume.txt", "r", encoding="utf-8").read()
-        else:
-            resume_text = None
+# --- Main Chat Interface ---
+user_question = st.text_input("Ask a question about the candidate (e.g., 'What are their Python skills?')")
 
-    # Load embedding model
-    @st.cache_resource
-    def load_embedding_model():
-        return SentenceTransformer(EMBED_MODEL_NAME)
-    emb_model = load_embedding_model()
-
-    # Build / load index
-    index, meta = load_index_and_meta(emb_model)
-    if index is None:
-        if not resume_text:
-            st.info("Upload resume.txt (sidebar) or place resume.txt next to this script, then click 'Build Index'.")
-        if st.sidebar.button("Build index from uploaded resume"):
-            if not resume_text:
-                st.sidebar.error("No resume text found.")
-            else:
-                with st.spinner("Chunking + embedding + building FAISS index..."):
-                    index, meta = build_index(emb_model, resume_text)
-                st.sidebar.success("Index built & saved (resume_index.faiss, resume_metadata.json)")
-    else:
-        st.sidebar.success("Index loaded from disk.")
-
-    st.write("### Chat")
-    question = st.text_input("Ask a question about the resume", key="q")
-    if st.button("Ask") and question.strip():
-        if index is None or meta is None:
-            st.error("Index not built. Upload resume and click Build index.")
-        else:
-            with st.spinner("Retrieving relevant resume passages..."):
-                retrieved = retrieve(emb_model, index, meta, question, top_k=TOP_K)
-            st.markdown("**Retrieved passages (source chunks):**")
-            for r in retrieved:
-                st.markdown(f"- chunk **{r['id']}** (score: {r['score']:.4f}): {r['text'][:300]}...")
-            # Build prompt & answer
-            system_prompt, user_prompt = build_prompt(question, retrieved)
-            st.markdown("---")
-            st.markdown("**Answer (from local LLM):**")
-            with st.spinner("Generating answer with local model... (may take a few seconds)"):
-                response = answer_with_gpt4all(GPT4ALL_MODEL, system_prompt, user_prompt, max_tokens=400)
-            st.write(response)
-
-    # Footer: quick instructions
-    st.markdown("---")
-    st.markdown("**Notes:** 1) For best results upload a plain text resume. 2) To re-index new resume delete `resume_index.faiss` and `resume_metadata.json` and rebuild.")
-    st.markdown("**Advanced:** adapt chunking to tokens if you have a tokenizer; use a more advanced index (IVF/PQ) for very large docs.")
-
-if __name__ == "__main__":
-    main()
+if user_question:
+    try:
+        user_input(user_question)
+    except Exception as e:
+        st.error(f"An error occurred: {e}")
+        st.info("Please ensure you have uploaded and processed a resume first.")
