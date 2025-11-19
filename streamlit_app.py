@@ -41,39 +41,35 @@ def get_text_chunks(text):
 
 def get_vector_store(text_chunks):
     """
-    UPDATED: Embeds text chunks in batches to avoid Error 429 (Rate Limit).
+    UPDATED: Uses the newer 'text-embedding-004' model which has a valid free tier.
     """
     api_key = st.secrets["GOOGLE_API_KEY"]
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
+    # CHANGED: from "models/embedding-001" to "models/text-embedding-004"
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=api_key)
     
     vector_store = None
-    batch_size = 5  # Only send 5 chunks at a time
+    batch_size = 5  
     
-    # Visual progress bar for the user
     progress_text = "Embedding resume sections... please wait."
     my_bar = st.progress(0, text=progress_text)
     total_chunks = len(text_chunks)
     
     for i in range(0, total_chunks, batch_size):
-        # Get the current batch of text
         batch = text_chunks[i:i + batch_size]
         
-        # If it's the first batch, create the store; otherwise, add to it
         if vector_store is None:
             vector_store = FAISS.from_texts(batch, embedding=embeddings)
         else:
             vector_store.add_texts(batch)
             
-        # Update progress bar
         progress = min((i + batch_size) / total_chunks, 1.0)
         my_bar.progress(progress, text=f"Processing batch {i//batch_size + 1}...")
         
-        # IMPORTANT: Pause for 2 seconds to respect Google's free tier limits
-        time.sleep(2)
+        # Keep the sleep to be safe, though the new model is often more generous
+        time.sleep(1) 
     
-    # Save the final index
     vector_store.save_local("faiss_index")
-    my_bar.empty() # Clear the bar when done
+    my_bar.empty()
 
 def get_conversational_chain():
     """
@@ -103,9 +99,9 @@ def user_input(user_question):
     Handles the user query.
     """
     api_key = st.secrets["GOOGLE_API_KEY"]
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
+    # CHANGED: from "models/embedding-001" to "models/text-embedding-004"
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=api_key)
     
-    # Load the FAISS index with security enabled deserialization
     try:
         new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
         docs = new_db.similarity_search(user_question)
