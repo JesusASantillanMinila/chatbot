@@ -2,140 +2,165 @@ import streamlit as st
 from PyPDF2 import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-import google.generativeai as genai
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
-import os
-import time  # <--- Added this library to handle the pauses
+import google.generativeai as genai
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+import io
+import time
 
 # --- Page Config ---
-st.set_page_config(page_title="Resume Chatbot", layout="wide")
+st.set_page_config(page_title="Resume Bot", layout="wide")
 
-# --- Header ---
-st.markdown("""
-<style>
-.big-font { font-size:30px !important; font-weight: bold; }
-</style>
-""", unsafe_allow_html=True)
-st.markdown('<p class="big-font">🤖 Chat with my Resume</p>', unsafe_allow_html=True)
+# --- 1. Drive Authentication & Fetching (Cached) ---
 
-# --- Helper Functions ---
+def get_drive_service():
+    """Authenticates with Google Drive using Streamlit Secrets."""
+    creds_info = st.secrets["gcp_service_account"]
+    creds = service_account.Credentials.from_service_account_info(
+        creds_info, scopes=['https://www.googleapis.com/auth/drive.readonly']
+    )
+    return build('drive', 'v3', credentials=creds)
 
-def get_pdf_text(pdf_docs):
-    """Extracts text from uploaded PDF files."""
-    text = ""
-    for pdf in pdf_docs:
-        pdf_reader = PdfReader(pdf)
-        for page in pdf_reader.pages:
-            text += page.extract_text()
-    return text
-
-def get_text_chunks(text):
-    """Splits the text into manageable chunks."""
-    # Increased chunk size slightly to reduce total number of API calls needed
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
-    chunks = text_splitter.split_text(text)
-    return chunks
-
-def get_vector_store(text_chunks):
-    """
-    UPDATED: Uses the newer 'text-embedding-004' model which has a valid free tier.
-    """
-    api_key = st.secrets["GOOGLE_API_KEY"]
-    # CHANGED: from "models/embedding-001" to "models/text-embedding-004"
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=api_key)
+def get_folder_text(folder_id):
+    """Downloads and reads all PDFs/Docs from the secret folder."""
+    service = get_drive_service()
+    query = f"'{folder_id}' in parents and trashed = false"
+    results = service.files().list(q=query, fields="files(id, name, mimeType)").execute()
+    files = results.get('files', [])
     
-    vector_store = None
-    batch_size = 5  
+    all_text = ""
+    if not files:
+        return None
+
+    # Visual feedback only during the initial load
+    progress_bar = st.progress(0, text="Connecting to Google Drive...")
     
-    progress_text = "Embedding resume sections... please wait."
-    my_bar = st.progress(0, text=progress_text)
-    total_chunks = len(text_chunks)
-    
-    for i in range(0, total_chunks, batch_size):
-        batch = text_chunks[i:i + batch_size]
+    for index, file in enumerate(files):
+        file_id = file['id']
+        name = file['name']
+        mime = file['mimeType']
         
-        if vector_store is None:
-            vector_store = FAISS.from_texts(batch, embedding=embeddings)
-        else:
-            vector_store.add_texts(batch)
+        progress_bar.progress((index + 1) / len(files), text=f"Reading file: {name}")
+
+        try:
+            if mime == 'application/pdf':
+                request = service.files().get_media(fileId=file_id)
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while done is False:
+                    _, done = downloader.next_chunk()
+                
+                fh.seek(0)
+                pdf_reader = PdfReader(fh)
+                for page in pdf_reader.pages:
+                    all_text += page.extract_text() + "\n"
+
+            elif mime == 'application/vnd.google-apps.document':
+                request = service.files().export_media(fileId=file_id, mimeType='text/plain')
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while done is False:
+                    _, done = downloader.next_chunk()
+                all_text += fh.getvalue().decode('utf-8') + "\n"
+
+        except Exception:
+            continue # Skip files that fail to read
             
-        progress = min((i + batch_size) / total_chunks, 1.0)
-        my_bar.progress(progress, text=f"Processing batch {i//batch_size + 1}...")
+    progress_bar.empty() # Hide bar when done
+    return all_text
+
+# --- 2. The "Brain" Builder (Cached) ---
+
+@st.cache_resource(show_spinner=False)
+def configure_rag_engine():
+    """
+    This function runs ONCE when the app starts.
+    It fetches data from Drive, embeds it, and stores the Vector Database in RAM.
+    """
+    with st.spinner("📥 Downloading resume data from Drive and building AI memory..."):
         
-        # Keep the sleep to be safe, though the new model is often more generous
-        time.sleep(1) 
-    
-    vector_store.save_local("faiss_index")
-    my_bar.empty()
-
-def get_conversational_chain():
-    """
-    Creates the chain that connects the LLM (Gemini) to the prompt.
-    """
-    prompt_template = """
-    Answer the question as detailed as possible from the provided context. 
-    If the answer is not in the provided context, just say, "The resume does not provide this information," don't make up the wrong answer.
-    
-    Context:
-    {context}
-    
-    Question: 
-    {question}
-    
-    Answer:
-    """
-    api_key = st.secrets["GOOGLE_API_KEY"]
-    
-    # UPDATED NOV 2025: Switched to 'gemini-2.5-flash' as 1.5 is deprecated.
-    model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3, google_api_key=api_key)
-    
-    prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-    chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
-    return chain
-
-def user_input(user_question):
-    """
-    Handles the user query.
-    """
-    api_key = st.secrets["GOOGLE_API_KEY"]
-    # CHANGED: from "models/embedding-001" to "models/text-embedding-004"
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=api_key)
-    
-    try:
-        new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-        docs = new_db.similarity_search(user_question)
-        chain = get_conversational_chain()
+        # 1. Get the Folder ID from Secrets
+        try:
+            folder_id = st.secrets["DRIVE_FOLDER_ID"]
+        except FileNotFoundError:
+            st.error("Missing secrets! Please add DRIVE_FOLDER_ID to .streamlit/secrets.toml")
+            return None
+            
+        # 2. Fetch Text
+        raw_text = get_folder_text(folder_id)
+        if not raw_text:
+            st.error("No files found in the Drive folder (or folder is empty).")
+            return None
+            
+        # 3. Split Text
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
+        chunks = text_splitter.split_text(raw_text)
         
-        response = chain(
-            {"input_documents": docs, "question": user_question},
-            return_only_outputs=True
-        )
-        st.write("reply: ", response["output_text"])
-    except RuntimeError as e:
-         st.error("Error: The index is missing. Please upload and process the resume first.")
+        # 4. Create Vector Store (Embeddings)
+        #    Using 'text-embedding-004' to avoid legacy model errors
+        api_key = st.secrets["GOOGLE_API_KEY"]
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=api_key)
+        
+        # Process in small batches to be kind to the API limits
+        vector_store = None
+        batch_size = 10 
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i:i + batch_size]
+            if vector_store is None:
+                vector_store = FAISS.from_texts(batch, embedding=embeddings)
+            else:
+                vector_store.add_texts(batch)
+            time.sleep(1) # Brief pause to respect rate limits
+            
+        return vector_store
 
-# --- Sidebar (Resume Upload) ---
-with st.sidebar:
-    st.title("Upload Resume")
-    pdf_docs = st.file_uploader("Upload your PDF Resume here", accept_multiple_files=True)
-    if st.button("Process Resume"):
-        if not pdf_docs:
-            st.warning("Please upload a file first.")
-        else:
-            with st.spinner("Processing..."):
-                try:
-                    raw_text = get_pdf_text(pdf_docs)
-                    text_chunks = get_text_chunks(raw_text)
-                    get_vector_store(text_chunks)
-                    st.success("Done! You can now ask questions.")
-                except Exception as e:
-                    st.error(f"Error processing file: {e}")
+# --- 3. Main Chat Interface ---
 
-# --- Main Chat Interface ---
-user_question = st.text_input("Ask a question about the candidate (e.g., 'What are their Python skills?')")
+st.markdown('<h1>🤖 Resume Chatbot</h1>', unsafe_allow_html=True)
 
-if user_question:
-    user_input(user_question)
+# Initialize the brain automatically
+vector_store_ram = configure_rag_engine()
+
+if vector_store_ram:
+    # Chat input
+    user_question = st.chat_input("Ask me anything about the resume...")
+
+    if user_question:
+        # Display user message
+        with st.chat_message("user"):
+            st.write(user_question)
+
+        # Generate answer
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                api_key = st.secrets["GOOGLE_API_KEY"]
+                # Using 'gemini-2.5-flash' as the standard model
+                model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3, google_api_key=api_key)
+                
+                prompt_template = """
+                Answer the question as detailed as possible from the provided context.
+                Context:
+                {context}
+                
+                Question: 
+                {question}
+                
+                Answer:
+                """
+                prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
+                chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
+                
+                docs = vector_store_ram.similarity_search(user_question)
+                response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
+                
+                st.write(response["output_text"])
+
+else:
+    st.info("Please ensure your secrets are configured and your Drive folder has files.")
