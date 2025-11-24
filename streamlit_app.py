@@ -128,8 +128,7 @@ st.markdown('<h1>Minil.Ai</h1>', unsafe_allow_html=True)
 var_li_url = "https://www.linkedin.com/in/jesussantillanminila/"
 
 st.markdown("""
-Hi, I am a chatbot built by [Jesus Santillan Minila](%s) to answer questions about his  
- professional background, technical skills, or project experience.
+Hi, I am a chatbot built by [Jesus Santillan Minila](%s) to answer questions about his professional background, technical skills, or project experience.
 """ % var_li_url)
 
 # Initialize the brain automatically
