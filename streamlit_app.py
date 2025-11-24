@@ -123,7 +123,12 @@ def configure_rag_engine():
 
 # --- 3. Main Chat Interface ---
 
-st.markdown('<h1>🤖 Resume Chatbot</h1>', unsafe_allow_html=True)
+st.markdown('<h1>Minil.Ai</h1>', unsafe_allow_html=True)
+
+st.markdown("""
+Hi, I am a chatbot built by **[Jesus Santillan Minila]**(https://www.linkedin.com/in/jesussantillanminila/) to answer questions about his  
+ professional background, technical skills, or project experience.
+""")
 
 # Initialize the brain automatically
 vector_store_ram = configure_rag_engine()
