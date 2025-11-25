@@ -157,7 +157,7 @@ if vector_store_ram:
                 Guidelines:
                 1. Be concise but detailed specific.
                 2. Prioritize hard facts (numbers, skills, dates) over generic descriptions.
-                3. If the answer is not in the context, say "I'm sorry, my responses are limited. You must ask the right questions."
+                3. If the answer is not in the context, redirect the user to a question that you can actually answer.
                 
                 Context:
                 {context}
