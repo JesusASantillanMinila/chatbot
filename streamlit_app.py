@@ -14,7 +14,8 @@ import io
 import time
 
 # --- Page Config ---
-st.set_page_config(page_title="Resume Bot", layout="wide")
+st.set_page_config(page_title="Professional Bot", layout="wide")
+
 
 # --- 1. Drive Authentication & Fetching (Cached) ---
 
