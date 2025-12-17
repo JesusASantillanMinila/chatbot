@@ -135,7 +135,7 @@ vector_store_ram = configure_rag_engine()
 if vector_store_ram:
     user_question = st.chat_input("Ask me anything about the experience...")
 
-    if user_question:
+    if user_question: 
         with st.chat_message("user"):
             st.write(user_question)
 
