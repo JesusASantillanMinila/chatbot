@@ -3,7 +3,8 @@ from PyPDF2 import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
-from langchain.chains.question_answering import load_qa_chain
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import PromptTemplate
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -139,34 +140,34 @@ if vector_store_ram:
             st.write(user_question)
 
         with st.chat_message("assistant"):
-            with st.spinner("Searching files..."):
+            with st.spinner("Thinking..."):
                 api_key = st.secrets["GOOGLE_API_KEY"]
-                
                 model = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3, google_api_key=api_key)
                 
-                prompt_template = """
-                You are a professional assistant. Answer the question using the provided context.
+                # 1. Define the specific system prompt
+                system_prompt = (
+                    " You are a professional assistant. Answer the question using the provided context.\n\n"
+                    "Guidelines:\n"
+                    "1. Be concise but detailed specific.\n"
+                    "2. Prioritize hard facts (numbers, skills, dates) over generic descriptions.\n"
+                    "3. If the answer is not in the context, redirect the user to a question that you can actually answer.\n\n"
+                    "Context:\n{context}"
+                )
                 
-                Guidelines:
-                1. Be concise but detailed specific.
-                2. Prioritize hard facts (numbers, skills, dates) over generic descriptions.
-                3. If the answer is not in the context, redirect the user to a question that you can actually answer.
+                prompt = ChatPromptTemplate.from_messages([
+                    ("system", system_prompt),
+                    ("human", "{input}"),
+                ])
+
+                # 2. Create the modern 'Stuff' chain
+                question_answer_chain = create_stuff_documents_chain(model, prompt)
                 
-                Context:
-                {context}
+                # 3. Get relevant documents
+                docs = vector_store_ram.similarity_search(user_question, k=5)
                 
-                Question: 
-                {question}
+                # 4. Run the chain
+                response = question_answer_chain.invoke({"context": docs, "input": user_question})
                 
-                Answer:
-                """
-                prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-                chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
-                
-                # Perform similarity search
-                docs = vector_store_ram.similarity_search(user_question, k=4)
-                response = chain.invoke({"input_documents": docs, "question": user_question})
-                
-                st.write(response["output_text"])
+                st.write(response)
 else:
     st.info("System initializing or awaiting configuration.")
