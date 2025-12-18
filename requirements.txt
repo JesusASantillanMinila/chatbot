@@ -1,9 +1,8 @@
 streamlit
-langchain
-langchain-community
-langchain-text-splitters
 langchain-google-genai
 langchain-google-community[drive]
+langchain-community
+langchain-core
 faiss-cpu
 google-api-python-client
 google-auth
