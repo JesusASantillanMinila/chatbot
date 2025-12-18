@@ -130,7 +130,12 @@ def query_llm(query, retrieved_context):
     model = genai.GenerativeModel('gemini-2.5-flash') # Free tier friendly model
     
     prompt = f"""
-    You are a helpful assistant. Answer the question based ONLY on the provided context.
+    You are a professional assistant. Answer the question using the provided context. 
+    Guidelines:
+    1. Be concise but detailed specific.
+    2. Prioritize hard facts (numbers, skills, dates) over generic descriptions.
+    3. If the answer is not in the context, redirect the user to a question that you can actually answer.
+
     
     Context:
     {retrieved_context}
@@ -144,8 +149,10 @@ def query_llm(query, retrieved_context):
 
 # --- MAIN APP UI ---
 
-st.title("🤖 Google Drive RAG Bot")
-st.caption("Ask questions about your Google Docs without LangChain")
+st.markdown('<h1>Minil.Ai</h1>', unsafe_allow_html=True)
+li_url = "https://www.linkedin.com/in/jesussantillanminila/"
+st.markdown(f"Hi, I am a chatbot built by [Jesus Santillan Minila]({li_url}) to answer questions about his career.")
+st.set_page_config(page_title="Professional Bot", layout="wide")
 
 # 1. Initialize Session State for Chat History
 if "messages" not in st.session_state:
@@ -153,14 +160,9 @@ if "messages" not in st.session_state:
 
 # 2. Initialize Vector DB (Run once)
 if "vector_db" not in st.session_state:
-    with st.spinner("Connecting to Google Drive and ingesting documents..."):
+    with st.spinner("Downloading data..."):
         folder_id = st.secrets["DRIVE_FOLDER_ID"]
         docs = load_documents_from_drive(folder_id)
-        if docs:
-            st.session_state.vector_db = initialize_vector_db(docs)
-            st.success(f"Ready! Loaded {len(docs)} text chunks.")
-        else:
-            st.error("Could not load documents. Check your Folder ID and permissions.")
 
 # 3. Display Chat History
 for message in st.session_state.messages:
@@ -168,7 +170,7 @@ for message in st.session_state.messages:
         st.markdown(message["content"])
 
 # 4. Chat Input & Processing
-if prompt := st.chat_input("Ask about your documents..."):
+if prompt := st.chat_input("Ask anything about the experience..."):
     # Add user message to history
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
