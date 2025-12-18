@@ -127,7 +127,7 @@ def query_llm(query, retrieved_context):
     """
     Sends the user query + retrieved context to Gemini Pro for an answer.
     """
-    model = genai.GenerativeModel('gemini-1.5-flash') # Free tier friendly model
+    model = genai.GenerativeModel('gemini-1.5-flash-latest') 
     
     prompt = f"""
     You are a helpful assistant. Answer the question based ONLY on the provided context.
