@@ -1,7 +1,9 @@
 streamlit
-google-auth
-google-auth-oauthlib
-google-auth-httplib2
+langchain
+langchain-community
+langchain-google-genai
+langchain-google-community[drive]
+faiss-cpu
 google-api-python-client
-google-generativeai
-chromadb
+google-auth-httplib2
+google-auth-oauthlib
