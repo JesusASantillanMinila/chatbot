@@ -130,11 +130,8 @@ if vector_store_ram:
             with st.spinner("Thinking..."):
                 api_key = st.secrets["GOOGLE_API_KEY"]
                 
-                # --- FIX: Using the correct model name alias ---
-                # Try 'gemini-1.5-flash' first; if it fails, 'gemini-1.5-flash-latest' 
-                # is the most common fix for the 404 error.
                 model = ChatGoogleGenerativeAI(
-                    model="gemini-1.5-flash", 
+                    model="gemini-2.0-flash", 
                     temperature=0.3, 
                     google_api_key=api_key
                 )
