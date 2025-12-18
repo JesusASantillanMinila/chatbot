@@ -35,7 +35,7 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
 
 def get_drive_service():
     """Authenticates with Google Drive using Service Account from Streamlit Secrets."""
-    creds_dict = st.secrets["SERVICE_ACCOUNT_JSON"]
+    creds_dict = st.secrets["gcp_service_account"]
     creds = service_account.Credentials.from_service_account_info(
         creds_dict,
         scopes=['https://www.googleapis.com/auth/drive.readonly']
