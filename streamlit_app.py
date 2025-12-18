@@ -196,7 +196,6 @@ if prompt := st.chat_input("Ask anything about the experience..."):
                 
                 # Display answer + sources
                 st.markdown(answer)
-                st.markdown(f"**Sources:** *{', '.join(sources)}*")
                 
                 # Append to history
                 st.session_state.messages.append({"role": "assistant", "content": answer})
