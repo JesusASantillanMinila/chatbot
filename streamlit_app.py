@@ -129,7 +129,15 @@ if vector_store_ram:
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 api_key = st.secrets["GOOGLE_API_KEY"]
-                model = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3, google_api_key=api_key)
+                
+                # --- FIX: Using the correct model name alias ---
+                # Try 'gemini-1.5-flash' first; if it fails, 'gemini-1.5-flash-latest' 
+                # is the most common fix for the 404 error.
+                model = ChatGoogleGenerativeAI(
+                    model="gemini-1.5-flash", 
+                    temperature=0.3, 
+                    google_api_key=api_key
+                )
                 
                 # --- MODERN LCEL CHAIN ---
                 
