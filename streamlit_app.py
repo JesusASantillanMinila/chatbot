@@ -50,7 +50,7 @@ def download_docs_from_folder(folder_id):
     for file in items:
         file_id = file['id']
         file_name = file['name']
-        status_bar.write(f"Downloading: {file_name}")
+        # status_bar.write(f"Downloading: {file_name}")
         
         # Export Google Doc as Plain Text
         request = service.files().export_media(fileId=file_id, mimeType='text/plain')
@@ -94,18 +94,19 @@ def initialize_knowledge_base(folder_id):
     my_bar.empty()
     
     # 3. Initialize Model with these files (Managed RAG)
-    # Using gemini-1.5-flash for speed and free tier efficiency
+    # Using gemini-2.5-flash for speed and free tier efficiency
     model = genai.GenerativeModel(
         model_name="gemini-2.5-flash",
-        system_instruction="You are a helpful assistant. Answer questions using the provided context files.",
+        system_instruction="You are a helpful assistant. Answer questions using the provided context files. If the answer is not in the context, redirect the user to a question that you can actually answer.",
         tools=[{"google_search_retrieval": {"dynamic_retrieval_config": {"mode": "unspecified"}}}]  # Fallback
     )
     
     return uploaded_files
 
 # --- STREAMLIT APP ---
-st.title("🤖 Google Drive RAG Chatbot")
-st.caption("Answers based on your Google Docs using Gemini")
+st.markdown('<h1>Minil.Ai</h1>', unsafe_allow_html=True)
+li_url = "https://www.linkedin.com/in/jesussantillanminila/"
+st.markdown(f"Hi, I am a chatbot built by [Jesus Santillan Minila]({li_url}) to answer questions about his career.")
 
 # Initialize Session State
 if "messages" not in st.session_state:
@@ -115,7 +116,7 @@ if "chat_session" not in st.session_state:
     files = initialize_knowledge_base(DRIVE_FOLDER_ID)
     if files:
         # Create a chat session with the uploaded files as history/context
-        # Note: Gemini 1.5 allows passing files directly in the history or generation request
+        # Note: Gemini 2.5 allows passing files directly in the history or generation request
         model = genai.GenerativeModel("gemini-2.5-flash")
         st.session_state.chat_session = model.start_chat(
             history=[
@@ -125,12 +126,12 @@ if "chat_session" not in st.session_state:
                 },
                 {
                     "role": "model",
-                    "parts": ["Understood. I have processed the files and am ready to answer your questions."]
+                    "parts": ["Understood. I am ready to answer your questions."]
                 }
             ]
         )
     else:
-        st.error("No documents found in the specified Drive folder.")
+        st.error("I could not find any reliable information.")
 
 # Display Chat History
 for message in st.session_state.messages:
