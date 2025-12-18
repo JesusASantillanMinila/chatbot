@@ -5,33 +5,30 @@ import json
 from langchain_google_community import GoogleDriveLoader
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+# --- FIX IS HERE: Updated Import ---
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
 
-# --- Page Config ---
+# Page Config
 st.set_page_config(page_title="Professional Bot", layout="wide")
-# --- 3. UI and Chat ---
-
 st.markdown('<h1>Minil.Ai</h1>', unsafe_allow_html=True)
 li_url = "https://www.linkedin.com/in/jesussantillanminila/"
 st.markdown(f"Hi, I am a chatbot built by [Jesus Santillan Minila]({li_url}) to answer questions about his career.")
 
 # 1. Setup Credentials
-# We write the secrets dictionary to a temp file because GoogleDriveLoader expects a file path.
 def get_service_account_file():
     if "gcp_service_account" not in st.secrets:
         st.error("Missing 'gcp_service_account' in secrets.")
         st.stop()
     
-    # Create a temporary file to store the service account JSON
     with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json') as temp_file:
         json.dump(dict(st.secrets["gcp_service_account"]), temp_file)
         temp_file.flush()
         return temp_file.name
 
-# 2. Load and Process Data (Cached to avoid reloading on every interaction)
+# 2. Load and Process Data
 @st.cache_resource(show_spinner=True)
 def load_and_process_data():
     try:
@@ -40,11 +37,10 @@ def load_and_process_data():
         
         st.write("🔄 Loading documents from Google Drive...")
         
-        # Initialize Loader
         loader = GoogleDriveLoader(
             folder_id=folder_id,
             service_account_key=service_account_path,
-            recursive=True  # Set to False if you don't want subfolders
+            recursive=True
         )
         
         docs = loader.load()
@@ -53,12 +49,10 @@ def load_and_process_data():
             st.error("No documents found! Did you share the folder with the service account email?")
             st.stop()
             
-        # Split Text
+        # Split Text using the imported splitter
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         splits = text_splitter.split_documents(docs)
         
-        # Create Embeddings and Vector Store
-        # Using Gemini Embeddings (Free tier available)
         if "GOOGLE_API_KEY" not in st.secrets:
             st.error("Missing GOOGLE_API_KEY in secrets.")
             st.stop()
@@ -70,9 +64,7 @@ def load_and_process_data():
         
         st.success(f"✅ Loaded {len(docs)} documents successfully!")
         
-        # Clean up temp file
         os.unlink(service_account_path)
-        
         return vectorstore
 
     except Exception as e:
@@ -83,7 +75,7 @@ def load_and_process_data():
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = load_and_process_data()
 
-# 3. Initialize LLM (Gemini Pro)
+# 3. Initialize LLM
 llm = ChatGoogleGenerativeAI(
     model="gemini-1.5-flash", 
     temperature=0,
@@ -94,11 +86,12 @@ llm = ChatGoogleGenerativeAI(
 retriever = st.session_state.vectorstore.as_retriever()
 
 system_prompt = (
-    "You are a professional assistant. Answer the question using the provided context.\n\n"
-    "Guidelines:\n"
-    "1. Be concise but detailed specific.\n"
-    "2. Prioritize hard facts (numbers, skills, dates) over generic descriptions.\n"
-    "3. If the answer is not in the context, redirect the user to a question that you can actually answer.\n\n"
+                    "You are a professional assistant. Answer the question using the provided context.\n\n"
+                    "Guidelines:\n"
+                    "1. Be concise but detailed specific.\n"
+                    "2. Prioritize hard facts (numbers, skills, dates) over generic descriptions.\n"
+                    "3. If the answer is not in the context, redirect the user to a question that you can actually answer.\n\n"
+    "\n\n"
     "{context}"
 )
 
@@ -116,24 +109,19 @@ rag_chain = create_retrieval_chain(retriever, question_answer_chain)
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Handle user input
 if prompt_text := st.chat_input("Ask a question about your docs..."):
-    # Display user message
     st.session_state.messages.append({"role": "user", "content": prompt_text})
     with st.chat_message("user"):
         st.markdown(prompt_text)
 
-    # Generate response
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             response = rag_chain.invoke({"input": prompt_text})
             answer = response["answer"]
             st.markdown(answer)
     
-    # Save assistant message
     st.session_state.messages.append({"role": "assistant", "content": answer})
