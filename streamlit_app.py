@@ -1,201 +1,156 @@
 import streamlit as st
-import google.generativeai as genai
+import os
+import tempfile
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
-import chromadb
-from chromadb import Documents, EmbeddingFunction, Embeddings
-import io
+import google.generativeai as genai
 
 # --- CONFIGURATION ---
-# Configure Gemini API
-genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+# Access secrets from Streamlit
+try:
+    DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
+    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+    SERVICE_ACCOUNT_INFO = st.secrets["gcp_service_account"]
+except Exception as e:
+    st.error(f"Missing secrets: {e}. Please configure .streamlit/secrets.toml")
+    st.stop()
 
-# --- CLASS DEFINITIONS ---
+# Configure Gemini
+genai.configure(api_key=GOOGLE_API_KEY)
 
-class GeminiEmbeddingFunction(EmbeddingFunction):
-    """
-    Custom embedding function for ChromaDB using Google's Gemini Embedding API.
-    Avoids LangChain dependencies.
-    """
-    def __call__(self, input: Documents) -> Embeddings:
-        model = "models/text-embedding-004" # Or "models/embedding-001"
-        
-        # Gemini API expects a specific format. We batch requests for efficiency.
-        # Note: Production apps might need more robust batching logic (e.g. max 100 at a time).
-        embeddings = []
-        for text in input:
-            response = genai.embed_content(
-                model=model,
-                content=text,
-                task_type="retrieval_document"
-            )
-            embeddings.append(response['embedding'])
-        return embeddings
-
+# --- GOOGLE DRIVE FUNCTIONS ---
 def get_drive_service():
-    """Authenticates with Google Drive using Service Account from Streamlit Secrets."""
-    creds_dict = st.secrets["gcp_service_account"]
+    """Authenticates and returns the Drive API service."""
     creds = service_account.Credentials.from_service_account_info(
-        creds_dict,
+        SERVICE_ACCOUNT_INFO,
         scopes=['https://www.googleapis.com/auth/drive.readonly']
     )
     return build('drive', 'v3', credentials=creds)
 
-def load_documents_from_drive(folder_id):
+def download_docs_from_folder(folder_id):
     """
-    Fetches all Google Docs from a specific folder and exports them as text.
-    Returns a list of dictionaries: [{'text': ..., 'source': ...}]
+    Exports Google Docs from a specific folder to local temporary text files.
+    Returns a list of file paths.
     """
     service = get_drive_service()
     results = []
     
-    # List files in the folder
-    query = f"'{folder_id}' in parents and mimeType = 'application/vnd.google-apps.document' and trashed = false"
-    # Fields parameter limits response size
-    response = service.files().list(q=query, fields="files(id, name)").execute()
-    files = response.get('files', [])
+    # List files in the folder (Query for Google Docs only to keep it simple)
+    query = f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.document' and trashed=false"
+    items = service.files().list(q=query, fields="files(id, name)").execute().get('files', [])
 
-    if not files:
-        st.warning("No Google Docs found in the specified folder.")
+    if not items:
         return []
 
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    for i, file in enumerate(files):
+    # Create a temporary directory to store downloaded files
+    temp_dir = tempfile.mkdtemp()
+    
+    status_bar = st.status("Syncing Knowledge Base...", expanded=True)
+    
+    for file in items:
         file_id = file['id']
         file_name = file['name']
-        status_text.text(f"Processing: {file_name}")
-
-        try:
-            # Export Google Doc as plain text
-            request = service.files().export_media(fileId=file_id, mimeType='text/plain')
-            fh = io.BytesIO()
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while done is False:
-                status, done = downloader.next_chunk()
-            
-            text_content = fh.getvalue().decode('utf-8')
-            
-            # Simple chunking (Split by paragraphs or character limit)
-            # For deeper RAG, use a recursive character splitter function.
-            # Here we do a simple split to keep it dependency-free.
-            chunk_size = 1000 
-            chunks = [text_content[j:j+chunk_size] for j in range(0, len(text_content), chunk_size)]
-            
-            for chunk in chunks:
-                if chunk.strip(): # Ignore empty chunks
-                    results.append({"text": chunk, "source": file_name})
-                    
-        except Exception as e:
-            st.error(f"Error processing {file_name}: {e}")
+        status_bar.write(f"Downloading: {file_name}")
         
-        progress_bar.progress((i + 1) / len(files))
-
-    status_text.text("Ingestion Complete!")
-    progress_bar.empty()
+        # Export Google Doc as Plain Text
+        request = service.files().export_media(fileId=file_id, mimeType='text/plain')
+        response = request.execute()
+        
+        # Save to temp file
+        safe_name = "".join([c for c in file_name if c.isalpha() or c.isdigit() or c==' ']).rstrip()
+        file_path = os.path.join(temp_dir, f"{safe_name}.txt")
+        
+        with open(file_path, "wb") as f:
+            f.write(response)
+        results.append(file_path)
+    
+    status_bar.update(label="Sync Complete!", state="complete", expanded=False)
     return results
 
-def initialize_vector_db(documents):
+# --- GEMINI RAG FUNCTIONS ---
+@st.cache_resource(show_spinner=False)
+def initialize_knowledge_base(folder_id):
     """
-    Initializes ChromaDB, creates embeddings via Gemini, and stores them.
+    Downloads docs, uploads them to Gemini File API, and sets up the model.
+    Cached so it doesn't re-run on every interaction.
     """
-    client = chromadb.Client() # Ephemeral (in-memory) for this session. Use PersistentClient for disk storage.
+    # 1. Download Files from Drive
+    file_paths = download_docs_from_folder(folder_id)
     
-    # Create a collection with our custom Gemini embedding function
-    collection = client.create_collection(
-        name="drive_docs",
-        embedding_function=GeminiEmbeddingFunction()
+    if not file_paths:
+        return None
+
+    # 2. Upload to Gemini File API
+    uploaded_files = []
+    progress_text = "Indexing documents in Gemini..."
+    my_bar = st.progress(0, text=progress_text)
+    
+    for i, path in enumerate(file_paths):
+        # Upload file to Gemini
+        gemini_file = genai.upload_file(path=path)
+        uploaded_files.append(gemini_file)
+        my_bar.progress((i + 1) / len(file_paths), text=progress_text)
+    
+    my_bar.empty()
+    
+    # 3. Initialize Model with these files (Managed RAG)
+    # Using gemini-1.5-flash for speed and free tier efficiency
+    model = genai.GenerativeModel(
+        model_name="gemini-2.5-flash",
+        system_instruction="You are a helpful assistant. Answer questions using the provided context files.",
+        tools=[{"google_search_retrieval": {"dynamic_retrieval_config": {"mode": "unspecified"}}}]  # Fallback
     )
-
-    ids = [str(i) for i in range(len(documents))]
-    texts = [doc['text'] for doc in documents]
-    metadatas = [{"source": doc['source']} for doc in documents]
-
-    # Add data to Chroma
-    # Note: Chroma handles the embedding calls automatically via the function we passed
-    collection.add(
-        documents=texts,
-        metadatas=metadatas,
-        ids=ids
-    )
-    return collection
-
-def query_llm(query, retrieved_context):
-    """
-    Sends the user query + retrieved context to Gemini Pro for an answer.
-    """
-    model = genai.GenerativeModel('gemini-2.5-flash') # Free tier friendly model
     
-    prompt = f"""
-    You are a professional assistant. Answer the question using the provided context. 
-    Guidelines:
-    1. Be concise but detailed specific.
-    2. Prioritize hard facts (numbers, skills, dates) over generic descriptions.
-    3. If the answer is not in the context, redirect the user to a question that you can actually answer.
+    return uploaded_files
 
-    
-    Context:
-    {retrieved_context}
-    
-    Question: 
-    {query}
-    """
-    
-    response = model.generate_content(prompt)
-    return response.text
+# --- STREAMLIT APP ---
+st.title("🤖 Google Drive RAG Chatbot")
+st.caption("Answers based on your Google Docs using Gemini")
 
-# --- MAIN APP UI ---
-
-st.markdown('<h1>Minil.Ai</h1>', unsafe_allow_html=True)
-li_url = "https://www.linkedin.com/in/jesussantillanminila/"
-st.markdown(f"Hi, I am a chatbot built by [Jesus Santillan Minila]({li_url}) to answer questions about his career.")
-st.set_page_config(page_title="Professional Bot", layout="wide")
-
-# 1. Initialize Session State for Chat History
+# Initialize Session State
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# 2. Initialize Vector DB (Run once)
-if "vector_db" not in st.session_state:
-    with st.spinner("Downloading data..."):
-        folder_id = st.secrets["DRIVE_FOLDER_ID"]
-        docs = load_documents_from_drive(folder_id)
+if "chat_session" not in st.session_state:
+    files = initialize_knowledge_base(DRIVE_FOLDER_ID)
+    if files:
+        # Create a chat session with the uploaded files as history/context
+        # Note: Gemini 1.5 allows passing files directly in the history or generation request
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        st.session_state.chat_session = model.start_chat(
+            history=[
+                {
+                    "role": "user",
+                    "parts": files + ["Use these files as your knowledge base."]
+                },
+                {
+                    "role": "model",
+                    "parts": ["Understood. I have processed the files and am ready to answer your questions."]
+                }
+            ]
+        )
+    else:
+        st.error("No documents found in the specified Drive folder.")
 
-# 3. Display Chat History
+# Display Chat History
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# 4. Chat Input & Processing
-if prompt := st.chat_input("Ask anything about the experience..."):
-    # Add user message to history
+# Chat Input
+if prompt := st.chat_input("Ask a question about your documents..."):
+    # Add user message to state
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # RAG Pipeline
-    if "vector_db" in st.session_state:
+    # Generate Response
+    if "chat_session" in st.session_state:
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                # A. Retrieve relevant docs
-                collection = st.session_state.vector_db
-                results = collection.query(
-                    query_texts=[prompt],
-                    n_results=3 # Number of chunks to retrieve
-                )
-                
-                # B. Format context
-                context_text = "\n\n".join(results['documents'][0])
-                sources = set([m['source'] for m in results['metadatas'][0]])
-                
-                # C. Generate Answer
-                answer = query_llm(prompt, context_text)
-                
-                # Display answer + sources
-                st.markdown(answer)
-                
-                # Append to history
-                st.session_state.messages.append({"role": "assistant", "content": answer})
+                try:
+                    response = st.session_state.chat_session.send_message(prompt)
+                    st.markdown(response.text)
+                    st.session_state.messages.append({"role": "assistant", "content": response.text})
+                except Exception as e:
+                    st.error(f"An error occurred: {e}")
