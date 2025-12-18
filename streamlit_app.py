@@ -1,144 +1,200 @@
 import streamlit as st
-import os
-import tempfile
-import json
-from langchain_google_community import GoogleDriveLoader
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-from langchain_community.vectorstores import FAISS
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate
+import google.generativeai as genai
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+import chromadb
+from chromadb import Documents, EmbeddingFunction, Embeddings
+import io
 
-# 1. PAGE CONFIG
-st.set_page_config(page_title="Google Drive RAG Bot", layout="wide")
-st.title("🤖 Chat with your Google Drive Docs")
+# --- CONFIGURATION ---
+# Configure Gemini API
+genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
-# 2. SECRETS & CREDENTIALS SETUP
-if "GOOGLE_API_KEY" not in st.secrets:
-    st.error("Missing GOOGLE_API_KEY in secrets.")
-    st.stop()
+# --- CLASS DEFINITIONS ---
 
-if "DRIVE_FOLDER_ID" not in st.secrets:
-    st.error("Missing DRIVE_FOLDER_ID in secrets.")
-    st.stop()
-
-if "service_account" not in st.secrets:
-    st.error("Missing service_account json in secrets.")
-    st.stop()
-
-# Set the API Key for LangChain Google GenAI
-os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
-
-# Helper: Write service account dict to a temporary file for the Loader
-@st.cache_resource
-def get_service_account_file():
-    """Writes the service account secret to a temp file and returns the path."""
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump(dict(st.secrets["service_account"]), f)
-        return f.name
-
-# 3. LOAD DOCUMENTS & CREATE VECTOR STORE (Cached)
-@st.cache_resource
-def initialize_vector_store():
+class GeminiEmbeddingFunction(EmbeddingFunction):
     """
-    Loads docs from Google Drive and creates a FAISS vector store.
-    This function is cached so it doesn't run on every interaction.
+    Custom embedding function for ChromaDB using Google's Gemini Embedding API.
+    Avoids LangChain dependencies.
     """
-    temp_creds_path = get_service_account_file()
-    folder_id = st.secrets["DRIVE_FOLDER_ID"]
+    def __call__(self, input: Documents) -> Embeddings:
+        model = "models/text-embedding-004" # Or "models/embedding-001"
+        
+        # Gemini API expects a specific format. We batch requests for efficiency.
+        # Note: Production apps might need more robust batching logic (e.g. max 100 at a time).
+        embeddings = []
+        for text in input:
+            response = genai.embed_content(
+                model=model,
+                content=text,
+                task_type="retrieval_document"
+            )
+            embeddings.append(response['embedding'])
+        return embeddings
+
+def get_drive_service():
+    """Authenticates with Google Drive using Service Account from Streamlit Secrets."""
+    creds_dict = st.secrets["SERVICE_ACCOUNT_JSON"]
+    creds = service_account.Credentials.from_service_account_info(
+        creds_dict,
+        scopes=['https://www.googleapis.com/auth/drive.readonly']
+    )
+    return build('drive', 'v3', credentials=creds)
+
+def load_documents_from_drive(folder_id):
+    """
+    Fetches all Google Docs from a specific folder and exports them as text.
+    Returns a list of dictionaries: [{'text': ..., 'source': ...}]
+    """
+    service = get_drive_service()
+    results = []
     
-    with st.spinner(f"Loading documents from Drive Folder: {folder_id}..."):
-        # Load documents
-        loader = GoogleDriveLoader(
-            folder_id=folder_id,
-            service_account_key=temp_creds_path,
-            recursive=False  # Set to True if you want subfolders
-        )
-        docs = loader.load()
+    # List files in the folder
+    query = f"'{folder_id}' in parents and mimeType = 'application/vnd.google-apps.document' and trashed = false"
+    # Fields parameter limits response size
+    response = service.files().list(q=query, fields="files(id, name)").execute()
+    files = response.get('files', [])
+
+    if not files:
+        st.warning("No Google Docs found in the specified folder.")
+        return []
+
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    for i, file in enumerate(files):
+        file_id = file['id']
+        file_name = file['name']
+        status_text.text(f"Processing: {file_name}")
+
+        try:
+            # Export Google Doc as plain text
+            request = service.files().export_media(fileId=file_id, mimeType='text/plain')
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while done is False:
+                status, done = downloader.next_chunk()
+            
+            text_content = fh.getvalue().decode('utf-8')
+            
+            # Simple chunking (Split by paragraphs or character limit)
+            # For deeper RAG, use a recursive character splitter function.
+            # Here we do a simple split to keep it dependency-free.
+            chunk_size = 1000 
+            chunks = [text_content[j:j+chunk_size] for j in range(0, len(text_content), chunk_size)]
+            
+            for chunk in chunks:
+                if chunk.strip(): # Ignore empty chunks
+                    results.append({"text": chunk, "source": file_name})
+                    
+        except Exception as e:
+            st.error(f"Error processing {file_name}: {e}")
         
-        if not docs:
-            st.warning("No documents found in the specified folder.")
-            return None
+        progress_bar.progress((i + 1) / len(files))
 
-        # Split text (optional but recommended for larger docs)
-        from langchain_text_splitters import RecursiveCharacterTextSplitter
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        splits = text_splitter.split_documents(docs)
+    status_text.text("Ingestion Complete!")
+    progress_bar.empty()
+    return results
 
-        # Create Vector Store using Google's Embeddings
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-        vectorstore = FAISS.from_documents(splits, embeddings)
-        
-        return vectorstore
+def initialize_vector_db(documents):
+    """
+    Initializes ChromaDB, creates embeddings via Gemini, and stores them.
+    """
+    client = chromadb.Client() # Ephemeral (in-memory) for this session. Use PersistentClient for disk storage.
+    
+    # Create a collection with our custom Gemini embedding function
+    collection = client.create_collection(
+        name="drive_docs",
+        embedding_function=GeminiEmbeddingFunction()
+    )
 
-# Initialize the knowledge base
-vector_store = initialize_vector_store()
+    ids = [str(i) for i in range(len(documents))]
+    texts = [doc['text'] for doc in documents]
+    metadatas = [{"source": doc['source']} for doc in documents]
 
-if vector_store is None:
-    st.stop()
+    # Add data to Chroma
+    # Note: Chroma handles the embedding calls automatically via the function we passed
+    collection.add(
+        documents=texts,
+        metadatas=metadatas,
+        ids=ids
+    )
+    return collection
 
-# 4. SETUP RAG CHAIN
-# Create the retriever
-retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 5})
+def query_llm(query, retrieved_context):
+    """
+    Sends the user query + retrieved context to Gemini Pro for an answer.
+    """
+    model = genai.GenerativeModel('gemini-1.5-flash') # Free tier friendly model
+    
+    prompt = f"""
+    You are a helpful assistant. Answer the question based ONLY on the provided context.
+    
+    Context:
+    {retrieved_context}
+    
+    Question: 
+    {query}
+    """
+    
+    response = model.generate_content(prompt)
+    return response.text
 
-# Setup the LLM (Gemini)
-llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash", 
-    temperature=0, 
-    max_tokens=None, 
-    timeout=None
-)
+# --- MAIN APP UI ---
 
-# Create the prompt template
-system_prompt = (
-    "You are an assistant for question-answering tasks. "
-    "Use the following pieces of retrieved context to answer "
-    "the question. If you don't know the answer, say that you "
-    "don't know. Use three sentences maximum and keep the "
-    "answer concise."
-    "\n\n"
-    "{context}"
-)
+st.title("🤖 Google Drive RAG Bot")
+st.caption("Ask questions about your Google Docs without LangChain")
 
-prompt = ChatPromptTemplate.from_messages(
-    [
-        ("system", system_prompt),
-        ("human", "{input}"),
-    ]
-)
-
-# Build the chain
-question_answer_chain = create_stuff_documents_chain(llm, prompt)
-rag_chain = create_retrieval_chain(retriever, question_answer_chain)
-
-# 5. CHAT INTERFACE
+# 1. Initialize Session State for Chat History
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display chat history
+# 2. Initialize Vector DB (Run once)
+if "vector_db" not in st.session_state:
+    with st.spinner("Connecting to Google Drive and ingesting documents..."):
+        folder_id = st.secrets["DRIVE_FOLDER_ID"]
+        docs = load_documents_from_drive(folder_id)
+        if docs:
+            st.session_state.vector_db = initialize_vector_db(docs)
+            st.success(f"Ready! Loaded {len(docs)} text chunks.")
+        else:
+            st.error("Could not load documents. Check your Folder ID and permissions.")
+
+# 3. Display Chat History
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Handle user input
-if prompt_text := st.chat_input("Ask a question about your documents..."):
+# 4. Chat Input & Processing
+if prompt := st.chat_input("Ask about your documents..."):
     # Add user message to history
-    st.session_state.messages.append({"role": "user", "content": prompt_text})
+    st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
-        st.markdown(prompt_text)
+        st.markdown(prompt)
 
-    # Generate response
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            response = rag_chain.invoke({"input": prompt_text})
-            answer = response["answer"]
-            st.markdown(answer)
-            
-            # Optional: Show source documents in an expander
-            with st.expander("View Source Documents"):
-                for i, doc in enumerate(response["context"]):
-                    st.markdown(f"**Source {i+1}:** {doc.metadata.get('source', 'Unknown')}")
-                    st.text(doc.page_content[:200] + "...")
-
-    # Add assistant message to history
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+    # RAG Pipeline
+    if "vector_db" in st.session_state:
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                # A. Retrieve relevant docs
+                collection = st.session_state.vector_db
+                results = collection.query(
+                    query_texts=[prompt],
+                    n_results=3 # Number of chunks to retrieve
+                )
+                
+                # B. Format context
+                context_text = "\n\n".join(results['documents'][0])
+                sources = set([m['source'] for m in results['metadatas'][0]])
+                
+                # C. Generate Answer
+                answer = query_llm(prompt, context_text)
+                
+                # Display answer + sources
+                st.markdown(answer)
+                st.markdown(f"**Sources:** *{', '.join(sources)}*")
+                
+                # Append to history
+                st.session_state.messages.append({"role": "assistant", "content": answer})
