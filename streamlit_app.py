@@ -106,23 +106,29 @@ def initialize_knowledge_base(folder_id):
     progress_text = "Indexing documents in Gemini..."
     my_bar = st.progress(0, text=progress_text)
     
+    # MIME type for DOCX files
+    docx_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    
     for i, path in enumerate(file_paths):
-        # Upload file to Gemini
-        gemini_file = genai.upload_file(path=path)
-        uploaded_files.append(gemini_file)
+        # FIX: Added explicit mime_type argument
+        try:
+            gemini_file = genai.upload_file(path=path, mime_type=docx_mime)
+            uploaded_files.append(gemini_file)
+        except Exception as e:
+            st.error(f"Failed to upload {path} to Gemini: {e}")
+            
         my_bar.progress((i + 1) / len(file_paths), text=progress_text)
     
     my_bar.empty()
     
     # 3. Initialize Model with these files (Managed RAG)
     model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        system_instruction="You are a helpful assistant. Answer questions using the provided context files. If the answer is not in the context, redirect the user to a question that you can actually answer.",
-        tools=[{"google_search_retrieval": {"dynamic_retrieval_config": {"mode": "unspecified"}}}]  # Fallback
+        model_name="gemini-1.5-flash", # Note: Updated to a stable model ID
+        system_instruction="You are a helpful assistant. Answer questions using the provided context files."
     )
     
     return uploaded_files
-
+    
 # --- STREAMLIT APP ---
 st.markdown('<h1>Minil.Ai</h1>', unsafe_allow_html=True)
 li_url = "https://www.linkedin.com/in/jesussantillanminila/"
