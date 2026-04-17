@@ -1,8 +1,10 @@
 import streamlit as st
 import os
 import tempfile
+import time
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 import google.generativeai as genai
 
 # --- CONFIGURATION ---
@@ -50,19 +52,38 @@ def download_docs_from_folder(folder_id):
     for file in items:
         file_id = file['id']
         file_name = file['name']
-        # status_bar.write(f"Downloading: {file_name}")
         
-        # Export Google Doc as DOCX (Fixed to avoid HTTP 500 error)
-        request = service.files().export_media(fileId=file_id, mimeType='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
-        response = request.execute()
+        # --- RETRY LOGIC FOR 500 INTERNAL ERRORS ---
+        response = None
+        for n in range(5):  # Try 5 times
+            try:
+                request = service.files().export_media(
+                    fileId=file_id, 
+                    mimeType='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                )
+                response = request.execute()
+                break  # Success, break retry loop
+            except HttpError as e:
+                if e.resp.status in [500, 502, 503, 504]:
+                    time.sleep(2 ** n)  # Exponential backoff (1s, 2s, 4s, 8s)
+                    continue
+                else:
+                    status_bar.write(f"❌ Error downloading {file_name}: {e}")
+                    break
+            except Exception as e:
+                status_bar.write(f"❌ Unexpected error for {file_name}: {e}")
+                break
         
-        # Save to temp file
-        safe_name = "".join([c for c in file_name if c.isalpha() or c.isdigit() or c==' ']).rstrip()
-        file_path = os.path.join(temp_dir, f"{safe_name}.docx")
-        
-        with open(file_path, "wb") as f:
-            f.write(response)
-        results.append(file_path)
+        # If we successfully got a response, save it
+        if response:
+            safe_name = "".join([c for c in file_name if c.isalpha() or c.isdigit() or c==' ']).rstrip()
+            file_path = os.path.join(temp_dir, f"{safe_name}.docx")
+            
+            with open(file_path, "wb") as f:
+                f.write(response)
+            results.append(file_path)
+        else:
+            status_bar.write(f"⚠️ Skipping {file_name} due to persistent Internal Error.")
     
     status_bar.update(label="Sync Complete!", state="complete", expanded=False)
     return results
@@ -94,7 +115,6 @@ def initialize_knowledge_base(folder_id):
     my_bar.empty()
     
     # 3. Initialize Model with these files (Managed RAG)
-    # Using gemini-2.5-flash for speed and free tier efficiency
     model = genai.GenerativeModel(
         model_name="gemini-2.5-flash",
         system_instruction="You are a helpful assistant. Answer questions using the provided context files. If the answer is not in the context, redirect the user to a question that you can actually answer.",
@@ -115,8 +135,6 @@ if "messages" not in st.session_state:
 if "chat_session" not in st.session_state:
     files = initialize_knowledge_base(DRIVE_FOLDER_ID)
     if files:
-        # Create a chat session with the uploaded files as history/context
-        # Note: Gemini 2.5 allows passing files directly in the history or generation request
         model = genai.GenerativeModel("gemini-2.5-flash")
         st.session_state.chat_session = model.start_chat(
             history=[
@@ -140,7 +158,6 @@ for message in st.session_state.messages:
 
 # Chat Input
 if prompt := st.chat_input("Ask a question..."):
-    # Add user message to state
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
