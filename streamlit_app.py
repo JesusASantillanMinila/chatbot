@@ -53,7 +53,7 @@ def download_docs_from_folder(folder_id):
         # status_bar.write(f"Downloading: {file_name}")
         
         # Export Google Doc as Plain Text
-        request = service.files().export_media(fileId=file_id, mimeType='text/plain')
+        request = service.files().export_media(fileId=file_id, mimeType='application/pdf')
         response = request.execute()
         
         # Save to temp file
