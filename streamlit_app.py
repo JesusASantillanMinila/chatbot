@@ -52,13 +52,13 @@ def download_docs_from_folder(folder_id):
         file_name = file['name']
         # status_bar.write(f"Downloading: {file_name}")
         
-        # Export Google Doc as Plain Text
-        request = service.files().export_media(fileId=file_id, mimeType='text/plain')
+        # Export Google Doc as DOCX (Fixed to avoid HTTP 500 error)
+        request = service.files().export_media(fileId=file_id, mimeType='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
         response = request.execute()
         
         # Save to temp file
         safe_name = "".join([c for c in file_name if c.isalpha() or c.isdigit() or c==' ']).rstrip()
-        file_path = os.path.join(temp_dir, f"{safe_name}.txt")
+        file_path = os.path.join(temp_dir, f"{safe_name}.docx")
         
         with open(file_path, "wb") as f:
             f.write(response)
