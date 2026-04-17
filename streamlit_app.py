@@ -1,10 +1,8 @@
 import streamlit as st
 import os
 import tempfile
-import time
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 import google.generativeai as genai
 
 # --- CONFIGURATION ---
@@ -52,38 +50,19 @@ def download_docs_from_folder(folder_id):
     for file in items:
         file_id = file['id']
         file_name = file['name']
+        # status_bar.write(f"Downloading: {file_name}")
         
-        # --- RETRY LOGIC FOR 500 INTERNAL ERRORS ---
-        response = None
-        for n in range(5):  # Try 5 times
-            try:
-                request = service.files().export_media(
-                    fileId=file_id, 
-                    mimeType='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-                )
-                response = request.execute()
-                break  # Success, break retry loop
-            except HttpError as e:
-                if e.resp.status in [500, 502, 503, 504]:
-                    time.sleep(2 ** n)  # Exponential backoff (1s, 2s, 4s, 8s)
-                    continue
-                else:
-                    status_bar.write(f"❌ Error downloading {file_name}: {e}")
-                    break
-            except Exception as e:
-                status_bar.write(f"❌ Unexpected error for {file_name}: {e}")
-                break
+        # Export Google Doc as Plain Text
+        request = service.files().export_media(fileId=file_id, mimeType='text/plain')
+        response = request.execute()
         
-        # If we successfully got a response, save it
-        if response:
-            safe_name = "".join([c for c in file_name if c.isalpha() or c.isdigit() or c==' ']).rstrip()
-            file_path = os.path.join(temp_dir, f"{safe_name}.docx")
-            
-            with open(file_path, "wb") as f:
-                f.write(response)
-            results.append(file_path)
-        else:
-            status_bar.write(f"⚠️ Skipping {file_name} due to persistent Internal Error.")
+        # Save to temp file
+        safe_name = "".join([c for c in file_name if c.isalpha() or c.isdigit() or c==' ']).rstrip()
+        file_path = os.path.join(temp_dir, f"{safe_name}.txt")
+        
+        with open(file_path, "wb") as f:
+            f.write(response)
+        results.append(file_path)
     
     status_bar.update(label="Sync Complete!", state="complete", expanded=False)
     return results
@@ -106,29 +85,24 @@ def initialize_knowledge_base(folder_id):
     progress_text = "Indexing documents in Gemini..."
     my_bar = st.progress(0, text=progress_text)
     
-    # MIME type for DOCX files
-    docx_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    
     for i, path in enumerate(file_paths):
-        # FIX: Added explicit mime_type argument
-        try:
-            gemini_file = genai.upload_file(path=path, mime_type=docx_mime)
-            uploaded_files.append(gemini_file)
-        except Exception as e:
-            st.error(f"Failed to upload {path} to Gemini: {e}")
-            
+        # Upload file to Gemini
+        gemini_file = genai.upload_file(path=path)
+        uploaded_files.append(gemini_file)
         my_bar.progress((i + 1) / len(file_paths), text=progress_text)
     
     my_bar.empty()
     
     # 3. Initialize Model with these files (Managed RAG)
+    # Using gemini-2.5-flash for speed and free tier efficiency
     model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash", # Note: Updated to a stable model ID
-        system_instruction="You are a helpful assistant. Answer questions using the provided context files."
+        model_name="gemini-2.5-flash",
+        system_instruction="You are a helpful assistant. Answer questions using the provided context files. If the answer is not in the context, redirect the user to a question that you can actually answer.",
+        tools=[{"google_search_retrieval": {"dynamic_retrieval_config": {"mode": "unspecified"}}}]  # Fallback
     )
     
     return uploaded_files
-    
+
 # --- STREAMLIT APP ---
 st.markdown('<h1>Minil.Ai</h1>', unsafe_allow_html=True)
 li_url = "https://www.linkedin.com/in/jesussantillanminila/"
@@ -141,6 +115,8 @@ if "messages" not in st.session_state:
 if "chat_session" not in st.session_state:
     files = initialize_knowledge_base(DRIVE_FOLDER_ID)
     if files:
+        # Create a chat session with the uploaded files as history/context
+        # Note: Gemini 2.5 allows passing files directly in the history or generation request
         model = genai.GenerativeModel("gemini-2.5-flash")
         st.session_state.chat_session = model.start_chat(
             history=[
@@ -164,6 +140,7 @@ for message in st.session_state.messages:
 
 # Chat Input
 if prompt := st.chat_input("Ask a question..."):
+    # Add user message to state
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
