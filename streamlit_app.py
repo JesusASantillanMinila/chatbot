@@ -45,12 +45,9 @@ def download_docs_from_folder(folder_id):
     # Create a temporary directory to store downloaded files
     temp_dir = tempfile.mkdtemp()
     
-    status_bar = st.status("Syncing Knowledge Base...", expanded=True)
-    
     for file in items:
         file_id = file['id']
         file_name = file['name']
-        # status_bar.write(f"Downloading: {file_name}")
         
         # Export Google Doc as Plain Text
         request = service.files().export_media(fileId=file_id, mimeType='text/plain')
@@ -64,7 +61,6 @@ def download_docs_from_folder(folder_id):
             f.write(response)
         results.append(file_path)
     
-    status_bar.update(label="Sync Complete!", state="complete", expanded=False)
     return results
 
 # --- GEMINI RAG FUNCTIONS ---
@@ -82,24 +78,11 @@ def initialize_knowledge_base(folder_id):
 
     # 2. Upload to Gemini File API
     uploaded_files = []
-    progress_text = "Indexing documents in Gemini..."
-    my_bar = st.progress(0, text=progress_text)
     
-    for i, path in enumerate(file_paths):
+    for path in file_paths:
         # Upload file to Gemini
         gemini_file = genai.upload_file(path=path)
         uploaded_files.append(gemini_file)
-        my_bar.progress((i + 1) / len(file_paths), text=progress_text)
-    
-    my_bar.empty()
-    
-    # 3. Initialize Model with these files (Managed RAG)
-    # Using gemini-2.5-flash for speed and free tier efficiency
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        system_instruction="You are a helpful assistant. Answer questions using the provided context files. If the answer is not in the context, redirect the user to a question that you can actually answer.",
-        tools=[{"google_search_retrieval": {"dynamic_retrieval_config": {"mode": "unspecified"}}}]  # Fallback
-    )
     
     return uploaded_files
 
@@ -113,11 +96,24 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 if "chat_session" not in st.session_state:
-    files = initialize_knowledge_base(DRIVE_FOLDER_ID)
+    # Execute the cached function inside an active UI wrapper
+    with st.status("Syncing Knowledge Base...", expanded=True) as status_bar:
+        files = initialize_knowledge_base(DRIVE_FOLDER_ID)
+        
+        if files:
+            status_bar.update(label="Sync Complete!", state="complete", expanded=False)
+        else:
+            status_bar.update(label="No documents found.", state="error", expanded=False)
+
     if files:
+        # Initialize Model with these files (Managed RAG)
+        model = genai.GenerativeModel(
+            model_name="gemini-2.5-flash",
+            system_instruction="You are a helpful assistant. Answer questions using the provided context files. If the answer is not in the context, redirect the user to a question that you can actually answer.",
+            tools=[{"google_search_retrieval": {"dynamic_retrieval_config": {"mode": "unspecified"}}}] 
+        )
+        
         # Create a chat session with the uploaded files as history/context
-        # Note: Gemini 2.5 allows passing files directly in the history or generation request
-        model = genai.GenerativeModel("gemini-2.5-flash")
         st.session_state.chat_session = model.start_chat(
             history=[
                 {
