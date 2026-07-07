@@ -97,7 +97,7 @@ if "messages" not in st.session_state:
 
 if "chat_session" not in st.session_state:
     # Execute the cached function inside an active UI wrapper
-    with st.status("Syncing Knowledge Base...", expanded=True) as status_bar:
+    with st.status("Syncing Knowledge Base...", expanded=False) as status_bar:
         files = initialize_knowledge_base(DRIVE_FOLDER_ID)
         
         if files:
