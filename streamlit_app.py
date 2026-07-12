@@ -109,8 +109,8 @@ if "chat_session" not in st.session_state:
         # Initialize Model with these files (Managed RAG)
         model = genai.GenerativeModel(
             model_name="gemini-2.5-flash",
-            system_instruction="You are a helpful assistant. Answer questions using the provided context files. If the answer is not in the context, redirect the user to a question that you can actually answer.",
-            tools=[{"google_search_retrieval": {"dynamic_retrieval_config": {"mode": "unspecified"}}}] 
+            system_instruction="You are a helpful assistant. Answer questions using the provided context files. If the answer is not in the context, redirect the user to a question that you can actually answer."
+            
         )
         
         # Create a chat session with the uploaded files as history/context
