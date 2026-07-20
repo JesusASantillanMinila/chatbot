@@ -64,7 +64,7 @@ def download_docs_from_folder(folder_id):
     return results
 
 # --- GEMINI RAG FUNCTIONS ---
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False, ttl=86400)
 def initialize_knowledge_base(folder_id):
     """
     Downloads docs, uploads them to Gemini File API, and sets up the model.
