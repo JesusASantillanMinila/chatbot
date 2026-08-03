@@ -108,7 +108,7 @@ if "chat_session" not in st.session_state:
     if files:
         # Initialize Model with these files (Managed RAG)
         model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
+            model_name='gemini-3.5-flash-lite',
             system_instruction="You are a helpful assistant. Answer questions using the provided context files. If the answer is not in the context, redirect the user to a question that you can actually answer."
             
         )
